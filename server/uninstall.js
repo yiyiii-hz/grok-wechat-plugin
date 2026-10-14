@@ -19,6 +19,7 @@ export function knownStateHomes() {
   const homes = new Set([
     path.join(GROK_BOX_HOME, ".grok-wechat"),
     path.join(os.homedir(), ".grok-wechat"),
+    "/workspace/.grok-wechat",
   ]);
   const envHome = process.env.GROK_WECHAT_HOME?.trim();
   if (envHome) homes.add(path.resolve(envHome));
@@ -170,17 +171,6 @@ function mcpStillRunning() {
   return false;
 }
 
-let mcpGoneSince = 0;
-
-export function connectorAbandoned() {
-  if (mcpStillRunning()) {
-    mcpGoneSince = 0;
-    return false;
-  }
-  if (!mcpGoneSince) mcpGoneSince = Date.now();
-  return Date.now() - mcpGoneSince > 30_000;
-}
-
 export function touchConnectorActive() {
   for (const home of knownStateHomes()) {
     try {
@@ -214,8 +204,6 @@ crontab -l 2>/dev/null | grep -v -E 'grok-wechat|ensure-monitor\\.sh' | crontab 
 `.trim();
 }
 
-let shutdownHookRegistered = false;
-
 export function scheduleDeferredUninstall() {
   try {
     const child = spawn("sh", ["-c", deferredCleanupShell()], {
@@ -228,17 +216,6 @@ export function scheduleDeferredUninstall() {
   } catch {
     return false;
   }
-}
-
-export function registerShutdownCleanup() {
-  if (shutdownHookRegistered) return;
-  shutdownHookRegistered = true;
-  const run = () => scheduleDeferredUninstall();
-  process.once("SIGTERM", run);
-  process.once("SIGINT", run);
-  process.once("SIGHUP", run);
-  process.stdin?.once("end", run);
-  process.stdin?.once("close", run);
 }
 
 function collectDedicatedAssistants() {

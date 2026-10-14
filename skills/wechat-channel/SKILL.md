@@ -12,11 +12,11 @@ description: 用户要在 Grok Bot 里安装、登录、收发、登出或卸载
 
 `base_info.bot_agent = Grokbot/1.0.0`。连接页显示 Grokbot。微信里的「ClawBot」是腾讯产品名。
 
-仓库：https://github.com/little-thing/grok-wechat-plugin
+仓库：https://github.com/yiyiii-hz/grok-wechat-plugin
 
 ## 安装
 
-用户发一句「安装这个微信插件 https://github.com/little-thing/grok-wechat-plugin」即完成本渠道安装。技能就是本文件（本插件 `skills/wechat-channel/SKILL.md`）。
+用户发一句「安装这个微信插件 https://github.com/yiyiii-hz/grok-wechat-plugin」即完成本渠道安装。技能就是本文件（本插件 `skills/wechat-channel/SKILL.md`）。
 
 安装完成后 Grok Bot 上具备：
 
@@ -56,7 +56,7 @@ stdio 支持换行分隔 JSON 与 Content-Length 分帧。
 | `wechat_typing` | 发送或取消「正在输入」。必填 `on`、`to_user_id` |
 | `wechat_start_monitor` | 后台长轮询各已绑定账号，入站按账号 POST webhook |
 | `wechat_stop_monitor` | 停止后台长轮询 |
-| `wechat_approve` | `user_id` 加入 allowlist；`clear=true` 清空后接收全部私信。空列表表示接收全部 |
+| `wechat_approve` | `user_id` 加入 allowlist；`clear=true` 清空。空列表表示只接收扫码绑定者本人 |
 | `wechat_logout` | 默认登出全部并停 monitor；传入 `ilink_bot_id` 只登出一个 |
 | `wechat_uninstall` | 本机完整清理，返回 `platform_cleanup` 与 `dedicated_assistants_sidebar_delete` |
 
@@ -93,7 +93,7 @@ stdio 支持换行分隔 JSON 与 Content-Length 分帧。
 - 删除 `/home/box/grok-wechat-plugin` 与 `GROK_WECHAT_HOME` / `/home/box/.grok-wechat`（含 `account.json`、`wake.json`、token、inbox、media、pid、log、`ensure-monitor.sh`）
 - 清理 crontab 与 shell 自启项
 
-返回 `dedicated_assistants_sidebar_delete`（绑定期间登记的专属助手名称）。从 Settings 卸掉连接器后，monitor 也会自动完成本机清理。
+返回 `dedicated_assistants_sidebar_delete`（绑定期间登记的专属助手名称）。连接器进程退出或重启**不会**触发本机清理；必须先调用 `wechat_uninstall` 再卸载连接器。
 
 ### 2. 平台清理（安装助手执行）
 

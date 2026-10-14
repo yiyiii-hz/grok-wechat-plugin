@@ -31,7 +31,7 @@ import {
   setTyping,
   statusPayload,
 } from "./ilink.js";
-import { registerShutdownCleanup, touchConnectorActive, connectorAbandoned, runUninstall, uninstallWechat } from "./uninstall.js";
+import { touchConnectorActive, runUninstall, uninstallWechat } from "./uninstall.js";
 
 const self = fileURLToPath(import.meta.url);
 
@@ -246,12 +246,12 @@ const tools = {
     },
   },
   wechat_approve: {
-    description: "把用户加入 allowlist。allowlist 为空表示接受所有私信；非空则只处理列表内用户。",
+    description: "把用户加入 allowlist。allowlist 为空时只接收扫码绑定者本人的私信；非空则只处理列表内用户。",
     inputSchema: {
       type: "object",
       properties: {
         user_id: { type: "string" },
-        clear: { type: "boolean", description: "true 时清空 allowlist，恢复接收全部私信" },
+        clear: { type: "boolean", description: "true 时清空 allowlist，恢复为只接收扫码绑定者本人" },
       },
     },
     handle: async ({ user_id, clear }) => {
@@ -290,7 +290,10 @@ function writeMessage(msg) {
   const json = JSON.stringify(msg);
   fs.writeSync(1, json + "\n");
   try {
-    fs.appendFileSync("/workspace/.grok-wechat/mcp-host.log", `${new Date().toISOString()} out ${json.slice(0, 200)}\n`);
+    fs.appendFileSync(
+      "/workspace/.grok-wechat/mcp-host.log",
+      `${new Date().toISOString()} out ${JSON.stringify({ id: msg.id, error: msg.error ? true : undefined })}\n`,
+    );
   } catch { /* ignore */ }
 }
 
@@ -328,7 +331,6 @@ async function onRpc(msg) {
 }
 
 function startMcp() {
-  registerShutdownCleanup();
   ensureMonitor();
   let buf = Buffer.alloc(0);
   process.stdin.on("data", async (chunk) => {
@@ -374,8 +376,32 @@ function startMcp() {
 }
 
 
+/** POST webhook；只有 2xx 且 body 不含 success:false 才算唤醒成功。 */
+async function postWake(cfg, payload, log, label) {
+  try {
+    const res = await fetch(cfg.url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${cfg.key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    const text = await res.text();
+    log(`${label} ${res.status} ${text.slice(0, 180)}`);
+    let body = null;
+    try { body = JSON.parse(text); } catch { /* non-json */ }
+    return res.ok && body?.success !== false;
+  } catch (err) {
+    log(`${label} error ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+/** 按账号唤醒；返回唤醒失败、需下轮重试的消息。 */
 async function wakeAgent(messages, log) {
-  if (!messages.length) return;
+  if (!messages.length) return [];
+  const failed = [];
   const state = loadState();
   const byBot = new Map();
   for (const m of messages) {
@@ -388,41 +414,45 @@ async function wakeAgent(messages, log) {
     const cfg = resolveWakeForAccount(account);
     if (!cfg) {
       log(`wake skipped bot=${botId}: no wake config`);
+      failed.push(...batch);
       continue;
     }
-    try {
-      const res = await fetch(cfg.url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${cfg.key}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          source: "grok-wechat",
-          count: batch.length,
-          from_user_ids: batch.map((m) => m.from_user_id),
-          ilink_bot_id: botId,
-          ilink_user_id: account?.ilinkUserId || batch[0]?.ilink_user_id || "",
-        }),
-      });
-      const text = await res.text();
-      log(`wake bot=${botId} ${res.status} ${text.slice(0, 180)}`);
-    } catch (err) {
-      log(`wake error bot=${botId} ${err instanceof Error ? err.message : String(err)}`);
-    }
+    const woke = await postWake(cfg, {
+      source: "grok-wechat",
+      count: batch.length,
+      from_user_ids: [...new Set(batch.map((m) => m.from_user_id))],
+      ilink_bot_id: botId,
+      ilink_user_id: account?.ilinkUserId || batch[0]?.ilink_user_id || "",
+    }, log, `wake bot=${botId}`);
+    if (!woke) failed.push(...batch);
   }
+  return failed;
+}
+
+/** 登录过期时通知一次 Bot（微信侧已发不出消息），让它在 Grok Bot 里提醒用户重新扫码。 */
+async function notifyExpired(account, log) {
+  const cfg = resolveWakeForAccount(account);
+  if (!cfg) return false;
+  return postWake(cfg, {
+    source: "grok-wechat",
+    event: "session_expired",
+    count: 0,
+    ilink_bot_id: account.ilinkBotId,
+    ilink_user_id: account.ilinkUserId,
+    hint: "该微信号登录已过期（errcode -14），微信侧无法收发。请提醒用户重新 wechat_login_start 扫码。",
+  }, log, `expired-notice bot=${account.ilinkBotId}`);
 }
 
 async function pollAccount(account, log) {
   const raw = await getUpdates(account);
   if (raw.session_expired) {
     log(`session expired bot=${account.ilinkBotId}`);
-    return { messages: [], expired: true };
+    return { messages: [], expired: true, account };
   }
   const collected = await collectInbound(raw.msgs || [], account);
   const state = loadState();
   const allowed = collected.messages.filter((m) => isAllowed(state, m.from_user_id));
-  return { messages: allowed, expired: false };
+  return { messages: allowed, expired: false, account };
 }
 
 async function runMonitor() {
@@ -442,13 +472,12 @@ async function runMonitor() {
   process.on("SIGTERM", onExit);
   process.on("SIGINT", onExit);
   let failures = 0;
+  // 已入 inbox 但 webhook 未成功唤醒的消息：每轮（≤35s）重试，直到成功。
+  let pendingWake = [];
+  // 已发过过期通知的账号，恢复后清除，避免每轮重复唤醒。
+  const expiredNotified = new Set();
   while (true) {
     try {
-      if (connectorAbandoned()) {
-        log("connector removed, running uninstall");
-        runUninstall();
-        process.exit(0);
-      }
       const accountsNow = listAccounts();
       if (!accountsNow.length) {
         log("no accounts, stopping");
@@ -458,13 +487,28 @@ async function runMonitor() {
       const results = await Promise.all(accountsNow.map((account) => pollAccount(account, log)));
       failures = 0;
       const batch = results.flatMap((r) => r.messages);
-      if (results.some((r) => r.expired)) {
-        await sleep(60_000);
+      for (const r of results) {
+        const botId = r.account.ilinkBotId;
+        if (!r.expired) {
+          expiredNotified.delete(botId);
+        } else if (!expiredNotified.has(botId) && await notifyExpired(r.account, log)) {
+          expiredNotified.add(botId);
+        }
       }
       if (batch.length) {
         appendInbox(batch);
         log(`inbox +${batch.length}`);
-        await wakeAgent(batch, log);
+      }
+      const toWake = [...pendingWake, ...batch];
+      if (toWake.length) {
+        // 唤醒 payload 只带 user id，消息本体在 inbox；只需保留最近一批用于重试。
+        pendingWake = (await wakeAgent(toWake, log)).slice(-100);
+        if (pendingWake.length) log(`wake pending ${pendingWake.length}, retry next round`);
+      }
+      if (results.some((r) => r.expired)) {
+        await sleep(60_000);
+      } else if (pendingWake.length && !batch.length) {
+        await sleep(5_000);
       }
     } catch (err) {
       failures += 1;

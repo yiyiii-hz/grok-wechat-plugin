@@ -47,8 +47,21 @@ export function emptyState() {
 
 function ensureHome() {
   const { home, media } = paths();
-  fs.mkdirSync(home, { recursive: true });
-  fs.mkdirSync(media, { recursive: true });
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(media, { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(home, 0o700);
+  } catch {
+    // ignore
+  }
+}
+
+/** 原子写入且权限 600：先写临时文件并收紧权限，再 rename 覆盖。 */
+function writeFileSecure(file, content) {
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, content, { mode: 0o600 });
+  fs.chmodSync(tmp, 0o600);
+  fs.renameSync(tmp, file);
 }
 
 function migrateLegacyState(raw) {
@@ -87,10 +100,7 @@ export function loadState() {
 
 export function saveState(next) {
   ensureHome();
-  const { state } = paths();
-  const tmp = `${state}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(next, null, 2));
-  fs.renameSync(tmp, state);
+  writeFileSecure(paths().state, JSON.stringify(next, null, 2));
 }
 
 export function updateState(mutator) {
@@ -191,10 +201,11 @@ export function resolveAccountForPeer(state, { to_user_id, ilink_bot_id } = {}) 
   return matches[0];
 }
 
+/** allowlist 为空时只接收扫码绑定者本人的私信；非空则只处理名单内用户。 */
 export function isAllowed(state, userId) {
   if (!userId) return false;
-  if (!state.allowFrom?.length) return true;
-  return state.allowFrom.includes(userId);
+  if (state.allowFrom?.length) return state.allowFrom.includes(userId);
+  return listAccounts(state).some((a) => a.ilinkUserId === userId);
 }
 
 export function appendInbox(messages) {
@@ -202,14 +213,29 @@ export function appendInbox(messages) {
   ensureHome();
   const { inbox } = paths();
   const lines = messages.map((m) => JSON.stringify(m)).join("\n") + "\n";
-  fs.appendFileSync(inbox, lines);
+  fs.appendFileSync(inbox, lines, { mode: 0o600 });
 }
 
+/**
+ * 先把 inbox 原子 rename 走再读，期间 monitor 新写入的消息落进新文件，不会被清掉。
+ * 上次中途崩溃遗留的 *.draining 也一并取出。
+ */
 export function drainInbox() {
-  const { inbox } = paths();
-  if (!fs.existsSync(inbox)) return [];
-  const raw = fs.readFileSync(inbox, "utf8");
-  fs.writeFileSync(inbox, "");
+  const { home, inbox } = paths();
+  if (fs.existsSync(inbox)) {
+    fs.renameSync(inbox, `${inbox}.${Date.now()}-${process.pid}.draining`);
+  }
+  if (!fs.existsSync(home)) return [];
+  const prefix = `${path.basename(inbox)}.`;
+  const files = fs.readdirSync(home)
+    .filter((f) => f.startsWith(prefix) && f.endsWith(".draining"))
+    .sort();
+  let raw = "";
+  for (const f of files) {
+    const file = path.join(home, f);
+    raw += fs.readFileSync(file, "utf8");
+    fs.unlinkSync(file);
+  }
   return raw
     .split("\n")
     .map((line) => line.trim())
@@ -285,15 +311,7 @@ export function loadFallbackWake() {
 
 export function saveGlobalWake(url, key) {
   ensureHome();
-  const wakeFile = fallbackWakePath();
-  const tmp = `${wakeFile}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ url, key }, null, 2));
-  fs.renameSync(tmp, wakeFile);
-  try {
-    fs.chmodSync(wakeFile, 0o600);
-  } catch {
-    // ignore
-  }
+  writeFileSecure(fallbackWakePath(), JSON.stringify({ url, key }, null, 2));
 }
 
 export function hasGlobalWake() {

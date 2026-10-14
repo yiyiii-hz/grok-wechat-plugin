@@ -11,7 +11,7 @@ WeChat iLink channel for Grok Bot. After QR bind, DMs wake the matching dedicate
 - **Voice**: handled as transcription text
 - **Media**: receive and send images, videos, and files (inbound media is saved locally)
 - **Typing**: turn on before a reply, off after send
-- **Allowlist**: empty means accept every DM; once set, only listed users are handled
+- **Allowlist**: empty means only the WeChat user who scanned the QR code; once set, only listed users are handled
 - **Global webhook**: paste once; it covers every current and future bound account
 
 ## One-line install
@@ -19,7 +19,7 @@ WeChat iLink channel for Grok Bot. After QR bind, DMs wake the matching dedicate
 Send this in Grok Bot:
 
 ```
-Install this WeChat plugin https://github.com/little-thing/grok-wechat-plugin
+Install this WeChat plugin https://github.com/yiyiii-hz/grok-wechat-plugin
 ```
 
 ## Binding
@@ -50,7 +50,7 @@ Talk in WeChat as usual:
 
 The assistant can show typing while it works. Text, voice transcriptions, images, videos, and files are all handled; outbound media uses a local file path on the Grok Bot machine.
 
-To restrict who can talk, have the assistant add them to the allowlist. To unbind one number, ask to log that WeChat account out; omit the account to log all of them out.
+By default only the WeChat user who scanned the QR code can talk; to allow others, have the assistant add them to the allowlist. To unbind one number, ask to log that WeChat account out; omit the account to log all of them out.
 
 ## Multiple accounts
 
@@ -81,4 +81,4 @@ The installing assistant will:
 3. Delete Routine「微信入站唤醒」and「微信监听保活」on the installing assistant, and remove any leftover copies on other assistants.
 4. Tell the user to right-click → Delete the dedicated assistants listed in the uninstall response (e.g. 微信1, 微信2) in the sidebar.
 
-Removing the connector from Settings also triggers local monitor cleanup. After a clean uninstall, reinstall requires a fresh webhook paste and QR scan; `wechat_status` shows zero accounts.
+Say "uninstall the WeChat plugin" in chat before removing the connector: this fork does not auto-clean when the connector process exits or restarts (so Grok Bot restarts/updates never wipe the login). Removing the connector from Settings alone leaves the monitor and local state behind. After a clean uninstall, reinstall requires a fresh webhook paste and QR scan; `wechat_status` shows zero accounts.
